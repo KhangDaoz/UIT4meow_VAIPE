@@ -4,3 +4,14 @@ DINO/logs
 output
 dataset
 weights
+
+# training outputs
+logs/
+yolov7/runs/
+vietocr/weights/
+vietocr/checkpoint/
+vietocr/train_hw/
+vietocr/valid_hw/
+vietocr/config.yml
+vietocr/train.log
+__pycache__/

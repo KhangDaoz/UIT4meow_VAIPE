@@ -1,0 +1,7 @@
+# VAIPE prescriptions: detect drug-name text regions (single class).
+# Paths are relative to the yolov7/ folder (train.py is run from there).
+train: ../dataset/pres/yolov7/images/train
+val: ../dataset/pres/yolov7/images/val
+
+nc: 1
+names: [ 'drugname' ]
