@@ -20,3 +20,4 @@ __pycache__/
 yolov8/runs/
 /yolov8*.pt
 /yolo11*.pt
+vietocr/runs_split/
