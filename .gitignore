@@ -21,4 +21,6 @@ yolov8/runs/
 /yolov8*.pt
 /yolo11*.pt
 vietocr/runs_split/
+vietocr/runs_vaipe/
+results/
 1_vaipe/

@@ -1,18 +1,24 @@
-"""Build the VietOCR dataset (drug-name text lines) from the split manifest.
+"""Build the VietOCR dataset for block C (plan.md 5.3): every labelled text box, cropped.
 
-Same train/val/test split as the YOLOv8 data (splits/pres_split_seed<seed>.json, or the
-JSON/CSV given by --manifest), so
-no prescription used to test one model was seen by the other while training.
+Each box (all 6 classes by default) is cropped from the original image with a 2 px border,
+using the ground-truth box. Split: train / val / test = 820 / 176 / 176 (tools/vaipe_data.py),
+so the test crops are the "crops by GT box" that experiment E-C1 scores OCR engines on.
 
-Output (default dataset/pres/vietocr_split):
-    img/<prescription>_<k>.jpg   crop of the k-th drug-name box (k in label-file order)
-    train.txt / val.txt / test.txt   "img/<file>.jpg<TAB><text>" per line, sorted
+Output (default dataset/pres/vietocr):
+    img/{train,val,test}/<image>_<k>.png    crop of the k-th box of the label file
+    {train,val,test}.txt                    "img/<split>/<file>.png<TAB><text>" (VietOCR format)
+    {train,val,test}_meta.tsv               path, label (class), text  -> per-class CER
     stats.json
 
+Text is normalised to Unicode NFC with single spaces (tools/vaipe_data.clean_text).
+Boxes whose text has a character outside the VietOCR vocab are skipped (and counted).
+
 Usage:
-    python tools/prepare_vietocr_pres.py --data-root <public_train> [--seed 42] [--manifest path]
+    python tools/prepare_vietocr_pres.py --data-root 1_vaipe
+    python tools/prepare_vietocr_pres.py --data-root <public_train> --classes drugname quantity
 """
 import argparse
+import collections
 import json
 import os
 import shutil
@@ -20,74 +26,89 @@ import sys
 from pathlib import Path
 
 import cv2
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from split_pres import (DEFAULT_SEED, check_manifest, default_manifest_path,  # noqa: E402
-                        describe, list_stems, load_manifest)
+from vaipe_data import (CLASSES, clean_text, clip_box, find_data_root,  # noqa: E402
+                        load_records, read_label)
 
 REPO = Path(__file__).resolve().parent.parent
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--data-root', default=os.environ.get('DATA_ROOT', '/data/public_train'))
-    ap.add_argument('--seed', type=int, default=DEFAULT_SEED)
-    ap.add_argument('--manifest', default=None, help='default: splits/pres_split_seed<seed>.json')
-    ap.add_argument('--out', default=str(REPO / 'dataset' / 'pres' / 'vietocr_split'))
+    ap.add_argument('--data-root', default=os.environ.get('DATA_ROOT'),
+                    help='1_vaipe folder or public_train (default: search /kaggle/input)')
+    ap.add_argument('--manifest', default=None, help='only for public_train (default vaipe1 CSV)')
+    ap.add_argument('--classes', nargs='+', default=CLASSES, choices=CLASSES)
+    ap.add_argument('--pad', type=int, default=2, help='border in px around each box')
+    ap.add_argument('--vocab-config', default=str(REPO / 'vietocr' / 'vgg_transformer.yml'))
+    ap.add_argument('--out', default=str(REPO / 'dataset' / 'pres' / 'vietocr'))
     opt = ap.parse_args()
 
-    pres = Path(opt.data_root) / 'prescription'
-    label_dir, image_dir = pres / 'label', pres / 'image'
-    stems = list_stems(label_dir)
-
-    manifest_path = Path(opt.manifest) if opt.manifest else default_manifest_path(opt.seed)
-    if not manifest_path.exists():
-        sys.exit(f'{manifest_path} not found. Run tools/split_pres.py or tools/prepare_yolo_pres.py first.')
-    manifest = load_manifest(manifest_path)
-    problems = check_manifest(manifest, stems)
-    if problems:
-        sys.exit(f'{manifest_path} does not match the data:\n  ' + '\n  '.join(problems))
-    print(f'using split manifest {manifest_path} ({describe(manifest)})')
+    root = opt.data_root or find_data_root()
+    if root is None:
+        sys.exit('no data found; pass --data-root')
+    records, desc = load_records(root, opt.manifest)
+    print(f'data: {desc}')
+    with open(opt.vocab_config, encoding='utf-8') as f:
+        vocab = set(yaml.safe_load(f)['vocab'])
+    keep = set(opt.classes)
 
     out = Path(opt.out).resolve()
     if out.exists():
         shutil.rmtree(out)
-    (out / 'img').mkdir(parents=True)
-
     stats = {}
-    for split, names in manifest['splits'].items():
-        lines, n_skip = [], 0
-        for name in names:
-            img_path = next(iter(sorted(image_dir.glob(name + '.*'))), None)
-            if img_path is None:
-                sys.exit(f'image for {name} not found in {image_dir}')
-            img = cv2.imread(str(img_path))
+    for split, recs in records.items():
+        (out / 'img' / split).mkdir(parents=True)
+        lines, meta = [], []
+        per_class = collections.Counter()
+        skip = collections.Counter()
+        bad_chars = collections.Counter()
+        for r in recs:
+            img = cv2.imread(str(r.image))
+            if img is None:
+                sys.exit(f'cannot read {r.image}')
             h, w = img.shape[:2]
-            with open(label_dir / f'{name}.json', encoding='utf-8') as f:
-                anns = json.load(f)
-            k = 0
-            for a in anns:
-                if a.get('label') != 'drugname':
+            for k, a in enumerate(read_label(r.label)):
+                label = a.get('label')
+                if label not in keep:
                     continue
-                text = str(a.get('text', '')).replace('\t', ' ').replace('\n', ' ').strip()
-                x1, y1, x2, y2 = (int(round(float(v))) for v in a['box'])
-                x1, x2 = sorted((min(max(x1, 0), w), min(max(x2, 0), w)))
-                y1, y2 = sorted((min(max(y1, 0), h), min(max(y2, 0), h)))
-                if not text or x2 - x1 < 2 or y2 - y1 < 2:
-                    n_skip += 1
+                text = clean_text(a.get('text', ''))
+                x1, y1, x2, y2 = clip_box(a['box'], w, h)
+                if not text:
+                    skip['empty_text'] += 1
                     continue
-                fname = f'{name}_{k:02d}.jpg'
-                cv2.imwrite(str(out / 'img' / fname), img[y1:y2, x1:x2])
-                lines.append(f'img/{fname}\t{text}')
-                k += 1
+                if x2 - x1 < 2 or y2 - y1 < 2:
+                    skip['degenerate_box'] += 1
+                    continue
+                oov = [c for c in text if c not in vocab]
+                if oov:
+                    bad_chars.update(oov)
+                    skip['char_not_in_vocab'] += 1
+                    continue
+                x1, y1 = max(x1 - opt.pad, 0), max(y1 - opt.pad, 0)
+                x2, y2 = min(x2 + opt.pad, w), min(y2 + opt.pad, h)
+                rel = f'img/{split}/{r.stem}_{k:03d}.png'
+                cv2.imwrite(str(out / rel), img[y1:y2, x1:x2])
+                lines.append(f'{rel}\t{text}')
+                meta.append(f'{rel}\t{label}\t{text}')
+                per_class[label] += 1
         lines.sort()
+        meta.sort()
         with open(out / f'{split}.txt', 'w', encoding='utf-8') as f:
             f.write('\n'.join(lines) + '\n')
-        stats[split] = {'prescriptions': len(names), 'lines': len(lines), 'skipped_boxes': n_skip}
-        print(f'{split:5s}: {len(names)} prescriptions, {len(lines)} text lines ({n_skip} skipped)')
+        with open(out / f'{split}_meta.tsv', 'w', encoding='utf-8') as f:
+            f.write('path\tlabel\ttext\n' + '\n'.join(meta) + '\n')
+        stats[split] = {'images': len(recs), 'crops': len(lines),
+                        'crops_per_class': {c: per_class[c] for c in opt.classes},
+                        'skipped': dict(skip), 'chars_not_in_vocab': dict(bad_chars)}
+        print(f'{split:5s}: {len(recs)} images, {len(lines)} crops '
+              f'({", ".join(f"{c}={per_class[c]}" for c in opt.classes)}); skipped {dict(skip)}')
 
-    with open(out / 'stats.json', 'w') as f:
-        json.dump(stats, f, indent=1)
+    with open(out / 'stats.json', 'w', encoding='utf-8') as f:
+        json.dump({'source': desc, 'classes': opt.classes, 'pad': opt.pad, **stats},
+                  f, indent=1, ensure_ascii=False)
     print(f'dataset ready: {out}')
 
 

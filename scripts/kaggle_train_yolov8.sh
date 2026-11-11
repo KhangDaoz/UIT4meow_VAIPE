@@ -1,83 +1,78 @@
 #!/usr/bin/env bash
-# Train YOLOv8 (default yolov8s, drug-name boxes) + VietOCR (drug-name text) on Kaggle,
-# both on the same reproducible train/val/test = 70/15/15 split of the prescriptions.
-# YOLOv8 runs on GPU 0 and VietOCR on GPU 1 at the same time; each is scored on test at the end.
-# Independent of scripts/kaggle_train_ocr.sh (YOLOv7 + VietOCR, old 90/10 and 80/20 splits).
-# Results are copied to $OUT_DIR (kept by Kaggle after "Save Version") and zipped to results.zip.
+# Train the two models of plan.md on Kaggle, on the 1_vaipe split (train/val/test = 820/176/176):
+#   block B: YOLOv8s, text boxes of 6 classes (drugname, quantity, usage, diagnose, date, other)
+#   block C: VietOCR vgg_transformer fine-tuned on the crops of all text boxes (option C3),
+#            plus the score of the pretrained model on the same test crops (option C2)
+# Each model is scored on test at the end. Results go to $OUT_DIR and are zipped to results.zip.
 #
 # Usage, from anywhere:
 #   bash scripts/kaggle_train_yolov8.sh
+# Ways to run (GPU T4 x2):
+#   one session, both models in parallel (default): YOLO on GPU 0, VietOCR on GPU 1
+#   two sessions, as in plan.md:
+#     session 1: TRAIN_OCR=0  YOLO_DEVICE=0,1 bash scripts/kaggle_train_yolov8.sh
+#     session 2: TRAIN_YOLO=0 OCR_DEVICE=0    bash scripts/kaggle_train_yolov8.sh
 # Optional env vars:
-#   DATA_ROOT     public_train folder (auto-detected under /kaggle/input if unset)
-#   OUT_DIR       where to put results            (default /kaggle/working/output)
-#   SEED          split + training seed           (default 42)
-#                 the split is read from splits/pres_split_seed<SEED>.json (committed);
-#                 if that file is missing it is created with this seed.
-#   SPLIT         use another committed split instead: splits/pres_split_<SPLIT>.csv or .json
-#                 e.g. SPLIT=vaipe1 -> the 1_vaipe split (grouped by patient, 820/176/176);
-#                 SEED is then only the training seed. Unset = the seed split above.
-#   TRAIN_YOLO    1 = train YOLOv8, 0 = skip      (default 1)
-#   TRAIN_OCR     1 = train VietOCR, 0 = skip     (default 1)
-#   YOLO_MODEL    pretrained weights              (default yolov8s.pt)
-#   EPOCHS        YOLOv8 max epochs               (default 100)
-#   PATIENCE      YOLOv8 early-stop patience      (default 30)
-#   YOLO_BATCH    YOLOv8 batch size               (default 16)
-#   YOLO_DEVICE   YOLOv8 GPU: '0' or 'cpu'        (default 0)
-#   KEEP_LAST     1 = also save YOLOv8 last.pt    (default 0)
-#   OCR_ITERS     VietOCR iterations              (default 20000)
-#   OCR_VALID_EVERY  VietOCR val check interval   (default 3000)
-#   OCR_BATCH     VietOCR batch size              (default 32)
-#   OCR_DEVICE    VietOCR GPU: '1' or 'cpu'       (default 1)
+#   DATA_ROOT     1_vaipe folder, or public_train of vaipepill2022 (auto-detected under /kaggle/input)
+#   MANIFEST      split for public_train            (default splits/pres_split_vaipe1.csv)
+#   OUT_DIR       where to put results              (default /kaggle/working/output)
+#   SEED          training seed                     (default 42)
+#   TRAIN_YOLO    1 = train YOLOv8, 0 = skip        (default 1)
+#   TRAIN_OCR     1 = train VietOCR, 0 = skip       (default 1)
+#   YOLO_MODEL    pretrained weights                (default yolov8s.pt)
+#   IMGSZ         YOLOv8 image size                 (default 1024)
+#   EPOCHS        YOLOv8 max epochs                 (default 50)
+#   PATIENCE      YOLOv8 early-stop patience        (default 15)
+#   YOLO_BATCH    YOLOv8 batch size                 (default 16)
+#   YOLO_DEVICE   YOLOv8 GPU: '0', '0,1' or 'cpu'   (default 0)
+#   KEEP_LAST     1 = also save YOLOv8 last.pt      (default 0)
+#   OCR_ITERS     VietOCR iterations                (default 20000)
+#   OCR_VALID_EVERY  VietOCR val check interval     (default 2000)
+#   OCR_BATCH     VietOCR batch size                (default 32)
+#   OCR_MAX_WIDTH VietOCR image_max_width           (default 1024)
+#   OCR_DEVICE    VietOCR GPU: '1', '0' or 'cpu'    (default 1)
+#   OCR_CLASSES   classes cropped for VietOCR       (default all 6)
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-# ---- locate the dataset ------------------------------------------------------
-if [ -z "${DATA_ROOT:-}" ]; then
-    DATA_ROOT=$(find /kaggle/input -maxdepth 6 -type d -name public_train 2>/dev/null \
-                | while read -r d; do [ -d "$d/prescription/label" ] && echo "$d"; done | head -1)
-fi
-if [ -z "${DATA_ROOT:-}" ] || [ ! -d "$DATA_ROOT/prescription/label" ]; then
-    echo "ERROR: cannot find public_train/prescription/label. Add the vaipepill2022 dataset" \
-         "to the notebook or set DATA_ROOT." >&2
-    exit 1
-fi
-export DATA_ROOT
-echo "DATA_ROOT = $DATA_ROOT"
-
 OUT_DIR=${OUT_DIR:-/kaggle/working/output}
 SEED=${SEED:-42}
-SPLIT=${SPLIT:-}
-if [ -n "$SPLIT" ]; then
-    MANIFEST=$(ls splits/pres_split_"$SPLIT".csv splits/pres_split_"$SPLIT".json 2>/dev/null | head -1)
-    if [ -z "$MANIFEST" ]; then
-        echo "ERROR: SPLIT=$SPLIT but splits/pres_split_$SPLIT.csv/.json not found." >&2
-        exit 1
-    fi
-    MANIFEST_ARG=(--manifest "$MANIFEST")
-else
-    MANIFEST=splits/pres_split_seed"$SEED".json   # created by prepare_yolo_pres.py if missing
-    MANIFEST_ARG=()
-fi
-echo "SPLIT manifest = $MANIFEST"
 TRAIN_YOLO=${TRAIN_YOLO:-1}
 TRAIN_OCR=${TRAIN_OCR:-1}
 YOLO_MODEL=${YOLO_MODEL:-yolov8s.pt}
-EPOCHS=${EPOCHS:-100}
-PATIENCE=${PATIENCE:-30}
+IMGSZ=${IMGSZ:-1024}
+EPOCHS=${EPOCHS:-50}
+PATIENCE=${PATIENCE:-15}
 YOLO_BATCH=${YOLO_BATCH:-16}
 YOLO_DEVICE=${YOLO_DEVICE:-0}
 OCR_ITERS=${OCR_ITERS:-20000}
-OCR_VALID_EVERY=${OCR_VALID_EVERY:-3000}
+OCR_VALID_EVERY=${OCR_VALID_EVERY:-2000}
 OCR_BATCH=${OCR_BATCH:-32}
+OCR_MAX_WIDTH=${OCR_MAX_WIDTH:-1024}
 OCR_DEVICE=${OCR_DEVICE:-1}
+OCR_CLASSES=${OCR_CLASSES:-drugname quantity usage diagnose date other}
 mkdir -p "$OUT_DIR/logs"
 
 export WANDB_MODE=disabled                  # Kaggle has wandb installed; avoid the login prompt
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1   # torch>=2.6 defaults torch.load(weights_only=True)
 
-if [ "$YOLO_DEVICE" != cpu ] || [ "$OCR_DEVICE" != cpu ]; then
+if { [ "$TRAIN_YOLO" = 1 ] && [ "$YOLO_DEVICE" != cpu ]; } || { [ "$TRAIN_OCR" = 1 ] && [ "$OCR_DEVICE" != cpu ]; }; then
     nvidia-smi -L || { echo "ERROR: no GPU. Set Accelerator = GPU T4 x2." >&2; exit 1; }
 fi
+
+# ---- locate the dataset ------------------------------------------------------
+if [ -z "${DATA_ROOT:-}" ]; then
+    DATA_ROOT=$(python tools/vaipe_data.py --find)
+fi
+if [ -z "${DATA_ROOT:-}" ]; then
+    echo "ERROR: no data found under /kaggle/input. Add the 1_vaipe dataset (folders" \
+         "train/valid/test with images/ and labels/) or vaipepill2022, or set DATA_ROOT." >&2
+    exit 1
+fi
+export DATA_ROOT
+MANIFEST_ARG=(); [ -n "${MANIFEST:-}" ] && MANIFEST_ARG=(--manifest "$MANIFEST")
+echo "DATA_ROOT = $DATA_ROOT"
+python tools/vaipe_data.py --data-root "$DATA_ROOT" "${MANIFEST_ARG[@]}" || exit 1
 
 # ---- install -----------------------------------------------------------------
 set -e
@@ -90,38 +85,29 @@ if [ "${SKIP_INSTALL:-0}" != 1 ]; then
     fi
 fi
 [ "$TRAIN_YOLO" = 1 ] && python -c "import ultralytics; print('ultralytics', ultralytics.__version__)"
-if [ "$TRAIN_OCR" = 1 ]; then
-    python - <<'EOF'
-import sys, types
-try:
-    import imgaug
-except Exception:
-    m = types.ModuleType('imgaug'); m.augmenters = types.ModuleType('imgaug.augmenters')
-    sys.modules['imgaug'] = m; sys.modules['imgaug.augmenters'] = m.augmenters
-from vietocr.model.trainer import Trainer
-print('vietocr import OK')
-EOF
-fi
+[ "$TRAIN_OCR" = 1 ] && (cd vietocr && python -c "import eval_vietocr; from vietocr.model.trainer import Trainer; print('vietocr import OK')")
 
-# ---- prepare data: train/val/test = 70/15/15, fixed by the split manifest -----
-# also makes the seed manifest if missing (not when SPLIT is set)
-python tools/prepare_yolo_pres.py --data-root "$DATA_ROOT" --seed "$SEED" "${MANIFEST_ARG[@]}"
-[ "$TRAIN_OCR" = 1 ] && python tools/prepare_vietocr_pres.py --data-root "$DATA_ROOT" --seed "$SEED" "${MANIFEST_ARG[@]}"
+# ---- prepare data --------------------------------------------------------------
+[ "$TRAIN_YOLO" = 1 ] && python tools/prepare_yolo_pres.py --data-root "$DATA_ROOT" "${MANIFEST_ARG[@]}"
+# shellcheck disable=SC2086
+[ "$TRAIN_OCR" = 1 ] && python tools/prepare_vietocr_pres.py --data-root "$DATA_ROOT" "${MANIFEST_ARG[@]}" \
+    --classes $OCR_CLASSES
 set +e
 
 # ---- train both models in parallel --------------------------------------------
 YOLO_PID=; OCR_PID=
 if [ "$TRAIN_YOLO" = 1 ]; then
-    python yolov8/train.py --model "$YOLO_MODEL" --epochs "$EPOCHS" --patience "$PATIENCE" \
-        --batch "$YOLO_BATCH" --device "$YOLO_DEVICE" --workers 4 --seed "$SEED" \
-        > "$OUT_DIR/logs/yolov8.log" 2>&1 &
+    python yolov8/train.py --model "$YOLO_MODEL" --imgsz "$IMGSZ" --epochs "$EPOCHS" \
+        --patience "$PATIENCE" --batch "$YOLO_BATCH" --device "$YOLO_DEVICE" --workers 4 \
+        --seed "$SEED" > "$OUT_DIR/logs/yolov8.log" 2>&1 &
     YOLO_PID=$!
 fi
 if [ "$TRAIN_OCR" = 1 ]; then
     if [ "$OCR_DEVICE" = cpu ]; then OCR_ENV=""; OCR_DEV=cpu; else OCR_ENV=$OCR_DEVICE; OCR_DEV=cuda:0; fi
     CUDA_VISIBLE_DEVICES=$OCR_ENV python vietocr/train_vietocr_split.py \
         --iters "$OCR_ITERS" --valid-every "$OCR_VALID_EVERY" --batch-size "$OCR_BATCH" \
-        --device "$OCR_DEV" --seed "$SEED" > "$OUT_DIR/logs/vietocr.log" 2>&1 &
+        --max-width "$OCR_MAX_WIDTH" --device "$OCR_DEV" --seed "$SEED" \
+        > "$OUT_DIR/logs/vietocr.log" 2>&1 &
     OCR_PID=$!
 fi
 
@@ -142,27 +128,28 @@ YOLO_RC=skipped; [ -n "$YOLO_PID" ] && { YOLO_RC=0; wait $YOLO_PID || YOLO_RC=$?
 OCR_RC=skipped;  [ -n "$OCR_PID" ]  && { OCR_RC=0;  wait $OCR_PID  || OCR_RC=$?; }
 
 # ---- collect results ---------------------------------------------------------
-cp "$MANIFEST" "$OUT_DIR/split_manifest.${MANIFEST##*.}" 2>/dev/null
+cp splits/pres_split_vaipe1.csv "$OUT_DIR/split_manifest.csv" 2>/dev/null
 if [ -n "$YOLO_PID" ]; then
-    RUN=yolov8/runs/pres
-    mkdir -p "$OUT_DIR/yolov8/test"
-    cp "$RUN"/weights/best.pt "$OUT_DIR/yolov8/yolov8s_ocr.pt" 2>/dev/null
+    RUN=yolov8/runs/vaipe6
+    mkdir -p "$OUT_DIR/yolov8/val" "$OUT_DIR/yolov8/test"
+    cp "$RUN"/weights/best.pt "$OUT_DIR/yolov8/yolo_vaipe.pt" 2>/dev/null
     [ "${KEEP_LAST:-0}" = 1 ] && cp "$RUN"/weights/last.pt "$OUT_DIR/yolov8/last.pt" 2>/dev/null
     cp "$RUN"/*.png "$RUN"/*.csv "$RUN"/*.yaml "$RUN"/test_metrics.json "$OUT_DIR/yolov8/" 2>/dev/null
+    cp "${RUN}_val"/*.png "$OUT_DIR/yolov8/val/" 2>/dev/null
     cp "${RUN}_test"/*.png "$OUT_DIR/yolov8/test/" 2>/dev/null
-    cp dataset/pres/yolov8/stats.json "$OUT_DIR/yolov8/" 2>/dev/null
+    cp dataset/pres/yolov8/stats.json dataset/pres/yolov8/data.yaml "$OUT_DIR/yolov8/" 2>/dev/null
     echo; echo "---- yolov8 (tail) ----"
-    clean "$OUT_DIR/logs/yolov8.log" | grep -E "^ +all |epochs completed|EarlyStopping|TEST RESULT|Error|Traceback" | tail -n 6
+    clean "$OUT_DIR/logs/yolov8.log" | grep -E "^(class|all|drugname|quantity|usage|diagnose|date|other) |conf that|epochs completed|EarlyStopping|TEST RESULT|Error|Traceback" | tail -n 14
 fi
 if [ -n "$OCR_PID" ]; then
-    RUN=vietocr/runs_split
+    RUN=vietocr/runs_vaipe
     mkdir -p "$OUT_DIR/vietocr"
-    cp "$RUN"/weights/transformerocr.pth "$OUT_DIR/vietocr/vietocr.pt" 2>/dev/null
-    cp "$RUN"/config.yml "$RUN"/train.log "$RUN"/test_metrics.json "$RUN"/test_predictions.tsv \
-       "$OUT_DIR/vietocr/" 2>/dev/null
-    cp dataset/pres/vietocr_split/stats.json "$OUT_DIR/vietocr/" 2>/dev/null
+    cp "$RUN"/weights/transformerocr.pth "$OUT_DIR/vietocr/vietocr_vaipe.pth" 2>/dev/null
+    cp "$RUN"/config.yml "$OUT_DIR/vietocr/vietocr_config.yml" 2>/dev/null
+    cp "$RUN"/train.log "$RUN"/C*_metrics.json "$RUN"/C*_predictions.tsv "$OUT_DIR/vietocr/" 2>/dev/null
+    cp dataset/pres/vietocr/stats.json "$OUT_DIR/vietocr/" 2>/dev/null
     echo; echo "---- vietocr (tail) ----"
-    clean "$OUT_DIR/logs/vietocr.log" | grep -v '^\s*$' | tail -n 6
+    clean "$OUT_DIR/logs/vietocr.log" | grep -E "^(==|class|all|drugname|quantity|usage|diagnose|date|other) |TEST RESULT|Error|Traceback" | tail -n 20
 fi
 
 # ---- zip everything into one file for easy download ---------------------------

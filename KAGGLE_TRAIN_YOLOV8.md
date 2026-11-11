@@ -1,214 +1,173 @@
-# Train YOLOv8s + VietOCR trên Kaggle (chia train/val/test cố định)
+# Train YOLOv8 + VietOCR trên Kaggle (theo `plan.md`)
 
-Luồng này train 2 model của nhánh đọc đơn thuốc **trên cùng một bộ chia train / val / test = 70 / 15 / 15**:
+Luồng này train 2 model học sâu của đồ án, trên **bộ chia `1_vaipe`** (train / val / test = **820 / 176 / 176**, gom theo bệnh nhân, xem `1_vaipe/README.md`):
 
-| Model | Nhiệm vụ | GPU | Kết quả |
+| Khối | Model | Nhiệm vụ | Kết quả |
 |---|---|---|---|
-| YOLOv8s | Phát hiện vùng *tên thuốc* trên đơn | T4 số 0 | `output/yolov8/yolov8s_ocr.pt` |
-| VietOCR (`vgg_transformer`) | Đọc chữ tên thuốc | T4 số 1 | `output/vietocr/vietocr.pt` |
+| B (plan 5.2) | YOLOv8s | Phát hiện **và phân lớp** vùng chữ, **6 lớp**: `drugname, quantity, usage, diagnose, date, other` | `output/yolov8/yolo_vaipe.pt` |
+| C (plan 5.3) | VietOCR `vgg_transformer` | Đọc chữ của **mọi vùng chữ** (cả 6 lớp), fine-tune từ pretrained = phương án **C3** | `output/vietocr/vietocr_vaipe.pth` |
 
-Hai model chạy **song song**. Cuối mỗi model đều được **chấm điểm trên tập test**.
+Cuối mỗi model đều **chấm trên tập test** (176 ảnh, chỉ chấm 1 lần). Script VietOCR còn chấm luôn **model pretrained chưa fine-tune (C2)** trên cùng các vùng cắt test, nên bảng E-C1 có sẵn 2 dòng C2 và C3.
 
-Luồng này **độc lập** với luồng cũ trong `KAGGLE_TRAIN.md`. Luồng cũ giữ nguyên, không sửa file nào:
-
-| | Luồng cũ | Luồng này |
-|---|---|---|
-| Script | `scripts/kaggle_train_ocr.sh` | `scripts/kaggle_train_yolov8.sh` |
-| Detector | YOLOv7x, train từ đầu | YOLOv8s, fine-tune từ pretrained COCO |
-| VietOCR | `vietocr/train_vietocr.py` | `vietocr/train_vietocr_split.py` |
-| Chia dữ liệu | YOLO 90/10, OCR 80/20 (khác nhau, không có test) | **Chung 1 manifest 70/15/15** |
+Luồng YOLOv7 cũ (`KAGGLE_TRAIN.md`, `scripts/kaggle_train_ocr.sh`) không bị sửa.
 
 ---
 
-## Cách chia dữ liệu (tái lập được)
+## Dữ liệu (nhóm dùng cách B)
 
-Tập `public_test` của cuộc thi không có nhãn, nên 1.173 đơn thuốc của `public_train` được chia thành:
+Dùng luôn **dataset gốc có sẵn trên Kaggle `tommyngx/vaipepill2022`**, không cần upload gì.
+Script tự tìm thư mục `public_train` trong `/kaggle/input` và lấy bộ chia từ file **`splits/pres_split_vaipe1.csv`** (đã commit trong repo, là bản sao y nguyên của `1_vaipe/split_manifest.csv`). Không cần đặt biến nào.
 
-| Tập | Số đơn | Dùng để |
-|---|---|---|
-| train | 821 | Train model |
-| val | 176 | Chọn weights tốt nhất (YOLOv8: `best.pt`, VietOCR: lần val có độ chính xác cao nhất) và dừng sớm |
-| test | 176 | **Chỉ chấm 1 lần ở cuối** → `test_metrics.json` |
+- Danh sách file của `public_train` khớp đúng với CSV: 1.173 đơn thuốc, gồm cả ảnh `VAIPE_P_TRAIN_1172`. Ảnh này bị CSV loại (`split = excluded`) vì trùng với một ảnh test không nhãn, script tự bỏ qua.
+- Các dòng `test_unlabeled` trong CSV bị bỏ qua. `valid` trong CSV được hiểu là tập val.
+- Nếu dữ liệu không khớp CSV (thiếu hoặc thừa file), script **dừng và báo lỗi**, không âm thầm chia lại.
+- Đừng sửa hay xoá `splits/pres_split_vaipe1.csv`: đây là nguồn duy nhất của bộ chia.
 
-Chia theo **đơn thuốc**, không theo từng dòng chữ hay từng box: mọi box và dòng chữ của cùng một đơn luôn nằm chung một tập.
-Cả YOLOv8 và VietOCR dùng **cùng manifest**, nên không đơn nào trong test bị model nào thấy lúc train.
-
-Bộ chia được cố định trong file **`splits/pres_split_seed42.json`** (đã commit vào repo):
-- `seed`, `ratios`, `counts`, danh sách tên file của từng tập và `names_sha256` (mã băm danh sách 1.173 tên file gốc).
-- Cách tạo: sắp xếp tên file → `random.Random(42).shuffle` → `n_val = round(n·0.15)`, `n_test = round(n·0.15)`, phần còn lại là train.
-- Khi train, script **đọc manifest này** chứ không chia lại. Vì vậy bộ chia luôn giống hệt, kể cả khi code hay phiên bản Python thay đổi.
-- Nếu dữ liệu không khớp manifest (thiếu hoặc thừa file), script **dừng và báo lỗi** chứ không âm thầm chia lại.
-- Chạy lại tool với cùng seed và cùng dữ liệu cho ra đúng file manifest này (đã kiểm tra trên Python 3.11 và 3.14).
-
-Seed khi train:
-- **YOLOv8**: `seed=42`, `deterministic=True` của ultralytics. Khi chạy thử trên CPU, 2 lần train cho loss và mAP giống hệt nhau.
-- **VietOCR**: đặt seed cho `random`, `numpy` và `torch` trước khi train.
-- Trên GPU, kết quả có thể lệch rất nhỏ giữa các lần chạy, do một số phép tính của cuDNN không tất định.
-
-Tạo bộ chia với seed khác, ví dụ `SEED=123` (seed 42 đang có sẵn manifest):
-```bash
-python tools/split_pres.py --label-dir <public_train>/prescription/label --seed 123
-# -> splits/pres_split_seed123.json, commit file này rồi chạy với SEED=123
+Đầu log phải ra đúng như sau:
 ```
-Nếu chạy `SEED=123` mà chưa có manifest, script sẽ tự tạo trên Kaggle và đưa vào file zip kết quả (`split_manifest.json`). Nên tải file đó về và commit vào thư mục `splits/` để lưu lại.
-
-Kiểm tra một manifest có khớp với dữ liệu không:
-```bash
-python tools/split_pres.py --label-dir <public_train>/prescription/label --check splits/pres_split_seed42.json
+DATA_ROOT = /kaggle/input/.../public_train
+... split by pres_split_vaipe1.csv (pres_split_vaipe1.csv, {'train': 820, 'val': 176, 'test': 176})
+train: 820 images, drugname=1995, quantity=1995, usage=2809, diagnose=1109, date=820, other=20108
+val  : 176 images, drugname=405, quantity=405, usage=583, diagnose=287, date=176, other=4402
+test : 176 images, drugname=443, quantity=443, usage=602, diagnose=253, date=176, other=4169
 ```
 
-### Dùng bộ chia của `1_vaipe` (`SPLIT=vaipe1`)
+> Cách khác (không dùng): upload thư mục `1_vaipe` thành Kaggle dataset riêng. Script cũng nhận dạng này (thư mục `train/`, `valid/`, `test/` có `images/` và `labels/`) và ưu tiên nó nếu gắn cả hai. Bộ chia giống hệt cách B.
 
-Bộ chia trong thư mục dữ liệu `1_vaipe` (train / valid / test = **820 / 176 / 176**) được lưu ở **`splits/pres_split_vaipe1.csv`** (bản sao y nguyên của `1_vaipe/split_manifest.csv`).
-Bộ này khác bộ seed 42 ở trên:
-- Ảnh **cùng bệnh nhân / các lần khám gần nhau** được gom thành nhóm, mỗi nhóm nằm trọn trong một tập (cách gom: xem `1_vaipe/README.md`).
-- Ảnh `VAIPE_P_TRAIN_1172` bị loại (`split = excluded`) vì trùng byte với ảnh test không nhãn `VAIPE_P_TEST_32`. Script tự bỏ ảnh này khỏi dữ liệu gốc trước khi kiểm tra.
-- Các dòng `test_unlabeled` (ảnh test gốc, không nhãn) bị bỏ qua.
-- `valid` trong CSV được hiểu là tập `val`.
+## Tham số mặc định (theo plan)
 
-Vẫn dùng dataset gốc `tommyngx/vaipepill2022` trên Kaggle, **không cần upload `1_vaipe`**: script chỉ lấy danh sách tên file từ CSV.
-`tools/split_pres.py` **không tạo lại** được bộ chia này, vì nó chia theo cách khác. File CSV đã commit là nguồn duy nhất, nên đừng xoá hay sửa nó.
+**YOLOv8** (`yolov8/train.py`): `yolov8s.pt`, `imgsz=1024`, `epochs=50`, `batch=16`, `patience=15`, `seed=42`, `fliplr=0` (lật ngang làm hỏng chữ), `mosaic=0.5`.
+`best.pt` chọn theo val. Sau khi train, script tìm **ngưỡng conf tối đa F1 trung bình trên val** (`conf_max_f1_on_val`) rồi chấm test.
 
-```python
-!SPLIT=vaipe1 bash /tmp/repo/scripts/kaggle_train_yolov8.sh
-```
-Trong log phải có `SPLIT manifest = splits/pres_split_vaipe1.csv` và `train: 820 images ... val: 176 ... test: 176`.
-`SEED` lúc này chỉ còn là seed train (mặc định 42). File zip kết quả chứa `split_manifest.csv`.
-
-Kiểm tra CSV có khớp với dữ liệu không:
-```bash
-python tools/split_pres.py --label-dir <public_train>/prescription/label --check splits/pres_split_vaipe1.csv
-```
+**VietOCR** (`vietocr/train_vietocr_split.py`): fine-tune từ `vgg_transformer` pretrained, `20000 iter`, `batch 32`, val mỗi `2000 iter`.
+- Vùng cắt theo **box chuẩn**, đệm 2 px, chữ chuẩn hoá Unicode NFC. Khoảng 28,8 nghìn vùng train / 6,3 nghìn val / 6,1 nghìn test.
+- `image_max_width = 1024` (mặc định của VietOCR là 512). Khoảng 5 % vùng chữ (dòng chẩn đoán, dòng dài) rộng hơn 512 px khi đưa về cao 32 px, nên ở 512 chúng bị bóp méo.
+- Train trên **train**, chọn weights theo độ chính xác khớp nguyên dòng trên **val**, chấm trên **test**. Plan ghi "train trên train + valid", nhưng như vậy sẽ không còn tập để chọn checkpoint, nên ở đây val chỉ dùng để chọn.
+- Độ đo: **CER, WER, tỉ lệ đúng nguyên dòng**, cho toàn tập và **từng lớp** (`drugname`, `quantity`, ...), cùng thời gian/vùng.
 
 ---
+
+## Bước 0: Đẩy code lên GitHub
+
+Notebook Kaggle `git clone` repo từ GitHub, nên mọi thay đổi phải được **commit và push lên `main`** trước khi chạy. Nếu không, Kaggle sẽ chạy code cũ.
 
 ## Bước 1: Tạo notebook
 
-Có thể tạo notebook mới, hoặc dùng lại notebook cũ bằng cách sửa cell.
-
-1. Gắn dataset `tommyngx/vaipepill2022` (**Add Input**).
-2. **Session options**: Accelerator **GPU T4 x2**, Internet **On**.
-3. Chỉ để lại 1 cell code:
+1. **Kaggle → Create → New Notebook**.
+2. **Add Input** → tìm `vaipepill2022` (của `tommyngx`) → **Add**.
+3. **Session options** (bên phải): Accelerator **GPU T4 x2**, Internet **On** (cần để clone repo và tải weights pretrained; tài khoản phải xác minh số điện thoại mới bật được).
+4. Một cell code:
    ```python
    !rm -rf /tmp/repo && git clone --depth 1 https://github.com/KhangDaoz/UIT4meow_VAIPE.git /tmp/repo
    !bash /tmp/repo/scripts/kaggle_train_yolov8.sh
    ```
 
-## Bước 2: Chạy thử nhanh (khoảng 15–20 phút)
+Có 2 cách chạy:
+
+| Cách chạy | Lệnh | Ghi chú |
+|---|---|---|
+| **1 session**, 2 model song song (mặc định) | `!bash /tmp/repo/scripts/kaggle_train_yolov8.sh` | YOLO dùng GPU 0, VietOCR dùng GPU 1 |
+| **2 session** như plan | Session 1: `!TRAIN_OCR=0 YOLO_DEVICE=0,1 bash /tmp/repo/scripts/kaggle_train_yolov8.sh`<br>Session 2: `!TRAIN_YOLO=0 OCR_DEVICE=0 bash /tmp/repo/scripts/kaggle_train_yolov8.sh` | YOLO chạy DDP trên 2 GPU, batch 16 chia đều 2 GPU |
+
+## Bước 2: Chạy thử nhanh (~15 phút)
 
 ```python
-!EPOCHS=1 OCR_ITERS=1000 OCR_VALID_EVERY=500 bash /tmp/repo/scripts/kaggle_train_yolov8.sh
+!EPOCHS=1 OCR_ITERS=400 OCR_VALID_EVERY=200 bash /tmp/repo/scripts/kaggle_train_yolov8.sh
 ```
 Kiểm tra trong log:
-- Có dòng `using split manifest .../pres_split_seed42.json`.
-- Số ảnh `train: 821 / val: 176 / test: 176`, cùng số dòng chữ OCR của từng tập.
-- Cuối log có 2 dòng `TEST RESULT: ...` (YOLOv8) và `TEST RESULT (VietOCR): ...`.
-- Có `YOLOv8 exit code : 0` và `VietOCR exit code: 0`.
+- `DATA_ROOT = /kaggle/input/.../public_train`, dòng `split by pres_split_vaipe1.csv` với `{'train': 820, 'val': 176, 'test': 176}`, và số box từng lớp như mục **Dữ liệu**.
+- `vietocr import OK`, `train: 28836 crops`.
+- Cuối log có bảng từng lớp của YOLO, `TEST RESULT (YOLOv8): ...`, hai bảng `== C2_pretrained` và `== C3_finetune`, `TEST RESULT (VietOCR C3): ...`.
+- `YOLOv8 exit code : 0` và `VietOCR exit code: 0`.
 
 Chạy thử xong thì bỏ các biến ở đầu lệnh đi.
 
 ## Bước 3: Save Version để treo máy
 
-**Save Version** → **Save & Run All (Commit)** → *Advanced Settings*: chọn Always save output, Accelerator **GPU T4 x2** → **Save**.
+1. Sửa cell lại, bỏ các biến chạy thử:
+   ```python
+   !rm -rf /tmp/repo && git clone --depth 1 https://github.com/KhangDaoz/UIT4meow_VAIPE.git /tmp/repo
+   !bash /tmp/repo/scripts/kaggle_train_yolov8.sh
+   ```
+2. **Save Version** → **Save & Run All (Commit)** → *Advanced Settings*: Always save output, Accelerator **GPU T4 x2** → **Save**.
+3. Có thể tắt máy, Kaggle vẫn chạy tiếp.
 
-- Thời gian dự kiến khoảng **2–4 giờ**. Hai model chạy song song: YOLOv8s mất khoảng 1–2 giờ, VietOCR 20.000 iter mất khoảng 2–4 giờ.
-- YOLOv8 **tự dừng sớm** nếu sau 30 epoch liên tiếp mAP trên val không tăng (`PATIENCE`).
-- Cứ 5 phút, tab **Logs** in tiến độ của từng model:
-  - YOLOv8: epoch hiện tại và dòng `val: all ... mAP50 mAP50-95`
-  - VietOCR: dòng `iter ... train loss` hoặc `valid loss ... acc full seq`
-- Cuối log có điểm test của 2 model. Đây là **các con số nên báo cáo**:
-  ```
-  TEST RESULT: precision=... recall=... mAP50=... mAP50-95=...
-  TEST RESULT (VietOCR): lines=... acc_full_sequence=... acc_per_char=...
-  ```
+- YOLOv8s 1024: khoảng **1,5–2,5 giờ** (dừng sớm nếu 15 epoch liền mAP val không tăng).
+- VietOCR 20k iter: khoảng **3–5 giờ** (lâu hơn bản cũ vì nhiều vùng hơn và ảnh rộng tới 1024).
+  Nếu thiếu thời gian, đặt `OCR_ITERS=10000`.
+- Cứ 5 phút log in tiến độ của từng model.
 
 ## Bước 4: Lấy kết quả
 
 ```
 output/
-├── results.zip                 ← TẢI FILE NÀY: chứa toàn bộ thư mục bên dưới (~170 MB)
-├── split_manifest.json         ← bộ chia đã dùng
+├── results.zip                       ← TẢI FILE NÀY (chứa mọi thứ bên dưới)
+├── split_manifest.csv
 ├── yolov8/
-│   ├── yolov8s_ocr.pt          ← weights tốt nhất theo val (~22 MB)
-│   ├── test_metrics.json       ← ĐIỂM TEST: precision, recall, mAP50, mAP50-95
-│   ├── test/                   ← PR curve, confusion matrix trên tập test
-│   ├── results.csv / results.png   (loss, mAP val theo epoch)
-│   ├── BoxPR_curve.png, confusion_matrix.png, ...  (trên tập val)
-│   ├── stats.json              ← số ảnh, số box của từng tập
-│   └── args.yaml               ← toàn bộ tham số train (có seed)
+│   ├── yolo_vaipe.pt                 ← weights khối B (best theo val)
+│   ├── test_metrics.json             ← E-B2: P/R/F1/mAP50/mAP50-95 toàn bộ + từng lớp (test và val), conf tối ưu
+│   ├── test/confusion_matrix*.png    ← ma trận nhầm lẫn 6 lớp trên test
+│   ├── val/                          ← các đường cong trên val
+│   ├── results.csv / results.png     ← loss, mAP theo epoch
+│   ├── args.yaml, data.yaml, stats.json
 ├── vietocr/
-│   ├── vietocr.pt              ← weights tốt nhất theo val (~150 MB)
-│   ├── test_metrics.json       ← ĐIỂM TEST: acc_full_sequence, acc_per_char
-│   ├── test_predictions.tsv    ← từng dòng test: ảnh, nhãn đúng, dự đoán, đúng/sai
-│   ├── stats.json              ← số dòng chữ của từng tập
-│   ├── config.yml, train.log
-└── logs/
-    ├── yolov8.log
-    └── vietocr.log
+│   ├── vietocr_vaipe.pth             ← weights khối C (C3)
+│   ├── vietocr_config.yml            ← config để load weights (image_max_width=1024)
+│   ├── C3_finetune_metrics.json      ← E-C1 dòng C3: CER/WER/acc toàn bộ + từng lớp, ms/vùng
+│   ├── C3_finetune_predictions.tsv   ← từng vùng test: lớp, nhãn đúng, dự đoán
+│   ├── C2_pretrained_metrics.json    ← E-C1 dòng C2
+│   ├── C2_pretrained_predictions.tsv
+│   ├── stats.json, train.log
+└── logs/ (yolov8.log, vietocr.log)
 ```
 
-- **`acc_full_sequence`**: tỉ lệ dòng đọc **đúng hoàn toàn**.
-- **`acc_per_char`**: tỉ lệ ký tự đúng vị trí, tính trung bình theo dòng.
+Cách tải: mở version → tab **Output** → `output/results.zip`. Nếu zip lỗi, tải riêng `yolo_vaipe.pt`, `vietocr_vaipe.pth`, `vietocr_config.yml` và các file `*_metrics.json`.
+Bằng CLI: `kaggle kernels output <user>/<notebook-slug> -p ./kaggle_out`.
+File zip được tạo kể cả khi train lỗi, để vẫn lấy được log.
 
-**Cách tải:**
-- **Trên web**: mở version → tab **Output** → mở thư mục `output` → rê chuột vào `results.zip` → bấm biểu tượng tải bên phải.
-  Nếu zip tải không được (vì `vietocr.pt` làm file nặng), hãy tải riêng từng file trong các thư mục `yolov8/` và `vietocr/`.
-  Đừng bấm nút tải cả thư mục, vì Kaggle phải nén lại toàn bộ trên server và nút đó hay bị treo.
-- **Bằng CLI** (tin cậy nhất):
-  ```bash
-  kaggle kernels output <user>/<notebook-slug> -p ./kaggle_out
-  unzip kaggle_out/output/results.zip -d results
-  ```
-- **Khi chạy tương tác** (không phải Save Version), thêm 1 cell để hiện link tải trực tiếp:
-  ```python
-  from IPython.display import FileLink
-  FileLink('output/results.zip')
-  ```
+## Dùng weights ở máy local
 
-File zip được tạo **kể cả khi train lỗi**, nên lúc đó bạn vẫn tải được log để xem nguyên nhân.
+Đặt weights vào `weights/` (đã gitignore). Chấm lại VietOCR trên vùng cắt test (cho E-C1 / E-C2):
+```bash
+python tools/prepare_vietocr_pres.py --data-root 1_vaipe            # -> dataset/pres/vietocr
+python vietocr/eval_vietocr.py --weights pretrained --name C2_pretrained --max-width 1024
+python vietocr/eval_vietocr.py --weights weights/vietocr_vaipe.pth \
+    --config weights/vietocr_config.yml --name C3_finetune
+# -> results/E-C1/<name>_metrics.json, <name>_predictions.tsv
+```
+Chấm OCR khác (Tesseract C0/C1) bằng cùng độ đo: `from ocr_metrics import evaluate` (`tools/ocr_metrics.py`), đọc nhãn từ `dataset/pres/vietocr/test_meta.tsv`.
 
 ---
 
 ## Tùy chỉnh
 
-Ví dụ chỉ train YOLOv8: `!TRAIN_OCR=0 bash /tmp/repo/scripts/kaggle_train_yolov8.sh`
-
 | Biến | Mặc định | Ý nghĩa |
 |---|---|---|
-| `SEED` | `42` | Seed chia dữ liệu và seed train. Đọc file `splits/pres_split_seed<SEED>.json` |
-| `SPLIT` | (trống) | Dùng bộ chia đã commit `splits/pres_split_<SPLIT>.csv` hoặc `.json` thay cho bộ chia theo seed. `vaipe1` = bộ chia của `1_vaipe` |
-| `TRAIN_YOLO` | `1` | `0` để bỏ qua YOLOv8 |
-| `TRAIN_OCR` | `1` | `0` để bỏ qua VietOCR |
-| `YOLO_MODEL` | `yolov8s.pt` | Có thể đổi sang `yolov8n.pt`, `yolov8m.pt`, ... |
-| `EPOCHS` | `100` | Số epoch tối đa của YOLOv8 |
-| `PATIENCE` | `30` | YOLOv8 dừng sớm sau N epoch không cải thiện |
-| `YOLO_BATCH` | `16` | Có thể tăng lên `32` trên T4. Nếu bị *out of memory* thì giảm |
-| `YOLO_DEVICE` | `0` | GPU cho YOLOv8 |
-| `KEEP_LAST` | `0` | Đặt `1` để lưu thêm `last.pt` của YOLOv8 |
-| `OCR_ITERS` | `20000` | Số iteration VietOCR. Dữ liệu ít nên có thể giảm còn khoảng 10.000 |
-| `OCR_VALID_EVERY` | `3000` | Cứ N iter thì chạy val VietOCR một lần. Weights chỉ được lưu ở các lần val này |
-| `OCR_BATCH` | `32` | Batch size VietOCR |
-| `OCR_DEVICE` | `1` | GPU cho VietOCR |
-| `DATA_ROOT` | tự tìm | Thư mục `public_train` |
-| `OUT_DIR` | `/kaggle/working/output` | Nơi lưu kết quả |
+| `DATA_ROOT` | tự tìm | Thư mục `1_vaipe` hoặc `public_train` |
+| `MANIFEST` | `splits/pres_split_vaipe1.csv` | Bộ chia, chỉ dùng với `public_train` |
+| `SEED` | `42` | Seed train |
+| `TRAIN_YOLO` / `TRAIN_OCR` | `1` | `0` để bỏ qua model đó |
+| `YOLO_MODEL` | `yolov8s.pt` | `yolov8n.pt`, `yolov8m.pt`, ... |
+| `IMGSZ` | `1024` | Kích thước ảnh YOLO (E-B1 so 640 / 1024) |
+| `EPOCHS` / `PATIENCE` | `50` / `15` | |
+| `YOLO_BATCH` | `16` | Giảm nếu *out of memory* |
+| `YOLO_DEVICE` | `0` | `0,1` để chạy 2 GPU |
+| `KEEP_LAST` | `0` | `1` để lưu thêm `last.pt` |
+| `OCR_ITERS` | `20000` | |
+| `OCR_VALID_EVERY` | `2000` | Weights chỉ được lưu ở các lần val |
+| `OCR_BATCH` | `32` | |
+| `OCR_MAX_WIDTH` | `1024` | |
+| `OCR_DEVICE` | `1` | `0` khi chạy session riêng |
+| `OCR_CLASSES` | cả 6 lớp | VD `"drugname quantity usage"` |
+| `OUT_DIR` | `/kaggle/working/output` | |
 
 ## Xử lý lỗi
 
 | Lỗi | Cách sửa |
 |---|---|
-| `ERROR: cannot find public_train/...` | Chưa gắn dataset (**Add Input**) |
+| `ERROR: no data found under /kaggle/input` | Chưa **Add Input** dataset `vaipepill2022` |
+| `... does not match ...` | Dataset gắn vào không phải bản `tommyngx/vaipepill2022` gốc (danh sách file khác CSV) |
+| Log không có `split by pres_split_vaipe1.csv` | Kaggle đang chạy code cũ: kiểm tra đã push lên `main` chưa |
 | `ERROR: no GPU` | Chưa chọn **GPU T4 x2** |
-| `... does not match the data` | Dữ liệu khác với lúc tạo manifest (sai dataset hoặc dataset đã đổi). Kiểm tra lại dataset đã gắn vào notebook |
-| Lỗi mạng khi `pip install`, tải `yolov8s.pt` hoặc tải pretrained VietOCR từ `vocr.vn` | Chưa bật **Internet**, hoặc server `vocr.vn` tạm lỗi thì chạy lại sau |
-| `CUDA out of memory` | Giảm `YOLO_BATCH` hoặc `OCR_BATCH` |
-| `No weights were exported` (VietOCR) | Độ chính xác val không tăng lên trên 0, thường do `OCR_ITERS` quá nhỏ. Tăng `OCR_ITERS` |
-| VietOCR lỗi `KeyError` với 1 ký tự lạ | Thêm ký tự đó vào dòng `vocab:` trong `vietocr/vgg_transformer.yml`, push lại |
-| Lỗi khác | Xem `output/logs/yolov8.log` và `output/logs/vietocr.log` |
-
----
-
-## Lưu ý: dùng weights YOLOv8 để suy luận
-
-`run.sh` và `yolov7/detect_ocr.py` hiện chỉ đọc được weights **YOLOv7**.
-Muốn dùng `yolov8s_ocr.pt` trong pipeline thì cần một bản `detect_ocr.py` dùng `ultralytics` với cùng định dạng output. Repo hiện chưa có file này.
-`vietocr.pt` của luồng này có cùng định dạng với luồng cũ, nên `yolov7/detect_ocr.py --weights_ocr` đọc được.
+| `CUDA out of memory` (YOLO) | `YOLO_BATCH=8` hoặc `YOLO_DEVICE=0,1` |
+| `CUDA out of memory` (VietOCR) | `OCR_BATCH=16` |
