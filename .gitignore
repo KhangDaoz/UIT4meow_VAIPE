@@ -15,3 +15,8 @@ vietocr/valid_hw/
 vietocr/config.yml
 vietocr/train.log
 __pycache__/
+
+# yolov8 training outputs
+yolov8/runs/
+/yolov8*.pt
+/yolo11*.pt
