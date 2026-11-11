@@ -13,6 +13,9 @@
 #   SEED          split + training seed           (default 42)
 #                 the split is read from splits/pres_split_seed<SEED>.json (committed);
 #                 if that file is missing it is created with this seed.
+#   SPLIT         use another committed split instead: splits/pres_split_<SPLIT>.csv or .json
+#                 e.g. SPLIT=vaipe1 -> the 1_vaipe split (grouped by patient, 820/176/176);
+#                 SEED is then only the training seed. Unset = the seed split above.
 #   TRAIN_YOLO    1 = train YOLOv8, 0 = skip      (default 1)
 #   TRAIN_OCR     1 = train VietOCR, 0 = skip     (default 1)
 #   YOLO_MODEL    pretrained weights              (default yolov8s.pt)
@@ -43,6 +46,19 @@ echo "DATA_ROOT = $DATA_ROOT"
 
 OUT_DIR=${OUT_DIR:-/kaggle/working/output}
 SEED=${SEED:-42}
+SPLIT=${SPLIT:-}
+if [ -n "$SPLIT" ]; then
+    MANIFEST=$(ls splits/pres_split_"$SPLIT".csv splits/pres_split_"$SPLIT".json 2>/dev/null | head -1)
+    if [ -z "$MANIFEST" ]; then
+        echo "ERROR: SPLIT=$SPLIT but splits/pres_split_$SPLIT.csv/.json not found." >&2
+        exit 1
+    fi
+    MANIFEST_ARG=(--manifest "$MANIFEST")
+else
+    MANIFEST=splits/pres_split_seed"$SEED".json   # created by prepare_yolo_pres.py if missing
+    MANIFEST_ARG=()
+fi
+echo "SPLIT manifest = $MANIFEST"
 TRAIN_YOLO=${TRAIN_YOLO:-1}
 TRAIN_OCR=${TRAIN_OCR:-1}
 YOLO_MODEL=${YOLO_MODEL:-yolov8s.pt}
@@ -88,8 +104,9 @@ EOF
 fi
 
 # ---- prepare data: train/val/test = 70/15/15, fixed by the split manifest -----
-python tools/prepare_yolo_pres.py --data-root "$DATA_ROOT" --seed "$SEED"   # also makes the manifest if missing
-[ "$TRAIN_OCR" = 1 ] && python tools/prepare_vietocr_pres.py --data-root "$DATA_ROOT" --seed "$SEED"
+# also makes the seed manifest if missing (not when SPLIT is set)
+python tools/prepare_yolo_pres.py --data-root "$DATA_ROOT" --seed "$SEED" "${MANIFEST_ARG[@]}"
+[ "$TRAIN_OCR" = 1 ] && python tools/prepare_vietocr_pres.py --data-root "$DATA_ROOT" --seed "$SEED" "${MANIFEST_ARG[@]}"
 set +e
 
 # ---- train both models in parallel --------------------------------------------
@@ -125,7 +142,7 @@ YOLO_RC=skipped; [ -n "$YOLO_PID" ] && { YOLO_RC=0; wait $YOLO_PID || YOLO_RC=$?
 OCR_RC=skipped;  [ -n "$OCR_PID" ]  && { OCR_RC=0;  wait $OCR_PID  || OCR_RC=$?; }
 
 # ---- collect results ---------------------------------------------------------
-cp splits/pres_split_seed"$SEED".json "$OUT_DIR/split_manifest.json" 2>/dev/null
+cp "$MANIFEST" "$OUT_DIR/split_manifest.${MANIFEST##*.}" 2>/dev/null
 if [ -n "$YOLO_PID" ]; then
     RUN=yolov8/runs/pres
     mkdir -p "$OUT_DIR/yolov8/test"

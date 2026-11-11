@@ -1,6 +1,7 @@
 """Build the VietOCR dataset (drug-name text lines) from the split manifest.
 
-Same train/val/test split as the YOLOv8 data (splits/pres_split_seed<seed>.json), so
+Same train/val/test split as the YOLOv8 data (splits/pres_split_seed<seed>.json, or the
+JSON/CSV given by --manifest), so
 no prescription used to test one model was seen by the other while training.
 
 Output (default dataset/pres/vietocr_split):
@@ -22,7 +23,7 @@ import cv2
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from split_pres import (DEFAULT_SEED, check_manifest, default_manifest_path,  # noqa: E402
-                        list_stems, load_manifest)
+                        describe, list_stems, load_manifest)
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -46,7 +47,7 @@ def main():
     problems = check_manifest(manifest, stems)
     if problems:
         sys.exit(f'{manifest_path} does not match the data:\n  ' + '\n  '.join(problems))
-    print(f'using split manifest {manifest_path} (seed={manifest["seed"]})')
+    print(f'using split manifest {manifest_path} ({describe(manifest)})')
 
     out = Path(opt.out).resolve()
     if out.exists():

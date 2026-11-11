@@ -23,8 +23,14 @@ Usage:
     python tools/split_pres.py --label-dir <public_train>/prescription/label --seed 42
     # check that an existing manifest matches the data (exit 1 if not)
     python tools/split_pres.py --label-dir <...>/prescription/label --check splits/pres_split_seed42.json
+
+A manifest can also be a CSV (columns image_id, split), e.g. splits/pres_split_vaipe1.csv:
+the 70/15/15 split of the 1_vaipe dataset, made by grouping images of the same patient.
+That split cannot be re-made by this tool; the committed CSV is the only source.
+    python tools/split_pres.py --label-dir <...>/prescription/label --check splits/pres_split_vaipe1.csv
 """
 import argparse
+import csv
 import hashlib
 import json
 import random
@@ -76,17 +82,66 @@ def default_manifest_path(seed):
     return REPO / 'splits' / f'pres_split_seed{seed}.json'
 
 
+CSV_SPLIT_NAMES = {'train': 'train', 'valid': 'val', 'val': 'val', 'test': 'test'}
+CSV_IGNORED = {'test_unlabeled'}   # public test images, no labels: not part of train/val/test
+
+
+def load_csv_manifest(path):
+    """Read a CSV split list (e.g. splits/pres_split_vaipe1.csv, from the 1_vaipe dataset).
+
+    Needs the columns image_id and split. split is train / valid (or val) / test;
+    'excluded' rows are dropped from the data before checking (e.g. a duplicate image);
+    'test_unlabeled' rows are ignored. Returns the same dict shape as the JSON manifest.
+    """
+    path = Path(path)
+    splits = {'train': [], 'val': [], 'test': []}
+    excluded = []
+    with open(path, encoding='utf-8', newline='') as f:
+        reader = csv.DictReader(f)
+        if not {'image_id', 'split'} <= set(reader.fieldnames or ()):
+            raise ValueError(f'{path}: needs columns image_id and split, got {reader.fieldnames}')
+        for row in reader:
+            name, split = row['image_id'].strip(), row['split'].strip()
+            if split in CSV_SPLIT_NAMES:
+                splits[CSV_SPLIT_NAMES[split]].append(name)
+            elif split == 'excluded':
+                excluded.append(name)
+            elif split not in CSV_IGNORED:
+                raise ValueError(f'{path}: unknown split {split!r} for {name}')
+    splits = {k: sorted(v) for k, v in splits.items()}
+    listed = [s for part in splits.values() for s in part]
+    return {
+        'description': f'split read from {path.name}',
+        'source': path.name,
+        'seed': None,
+        'n_total': len(listed),
+        'counts': {k: len(v) for k, v in splits.items()},
+        'excluded': sorted(excluded),
+        'names_sha256': names_sha256(listed),
+        'splits': splits,
+    }
+
+
 def load_manifest(path):
+    if Path(path).suffix.lower() == '.csv':
+        return load_csv_manifest(path)
     with open(path, encoding='utf-8') as f:
         return json.load(f)
 
 
 def check_manifest(manifest, stems):
-    """Return a list of problems (empty = manifest matches the data)."""
+    """Return a list of problems (empty = manifest matches the data).
+
+    Names in manifest['excluded'] (if any) are removed from the data first.
+    """
     problems = []
+    excluded = set(manifest.get('excluded', ()))
+    stems = [s for s in stems if s not in excluded]
     listed = [s for part in manifest['splits'].values() for s in part]
     if len(listed) != len(set(listed)):
         problems.append('some names appear in more than one split')
+    if excluded & set(listed):
+        problems.append('some excluded names are also listed in a split')
     missing = sorted(set(listed) - set(stems))
     extra = sorted(set(stems) - set(listed))
     if missing:
@@ -96,6 +151,12 @@ def check_manifest(manifest, stems):
     if not missing and not extra and manifest.get('names_sha256') != names_sha256(stems):
         problems.append('names_sha256 does not match')
     return problems
+
+
+def describe(manifest):
+    """Short text for logs: seed or source file, and counts."""
+    src = manifest.get('source') or f'seed={manifest.get("seed")}'
+    return f'{src}, {manifest["counts"]}'
 
 
 def main():
@@ -116,7 +177,9 @@ def main():
         problems = check_manifest(load_manifest(opt.check), stems)
         if problems:
             sys.exit('Manifest does not match data:\n  ' + '\n  '.join(problems))
-        print(f'OK: {opt.check} matches {len(stems)} labels')
+        m = load_manifest(opt.check)
+        print(f'OK: {opt.check} matches {len(stems)} labels ({describe(m)}, '
+              f'excluded {len(m.get("excluded", []))})')
         return
 
     manifest = make_split(stems, opt.seed, tuple(opt.ratios))

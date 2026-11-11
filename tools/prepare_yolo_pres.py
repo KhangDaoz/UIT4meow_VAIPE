@@ -4,11 +4,13 @@ Output (default dataset/pres/yolov8):
     images/{train,val,test}/<name>.png   symlinks to the original images (copy if symlink fails)
     labels/{train,val,test}/<name>.txt   one line per drug-name box: "0 xc yc w h" (normalised)
     data.yaml                            absolute paths, for ultralytics
-    split_manifest.json                  copy of the manifest used
+    split_manifest.json (or .csv)        copy of the manifest used
 
 The split comes from splits/pres_split_seed<seed>.json (made by tools/split_pres.py).
 If that file does not exist it is created from the label folder with the same seed,
 so the split is always the same for the same seed and data.
+--manifest can point to another manifest, JSON or CSV (e.g. splits/pres_split_vaipe1.csv);
+it must exist.
 
 Usage:
     python tools/prepare_yolo_pres.py --data-root <public_train> [--seed 42] [--manifest path]
@@ -24,7 +26,7 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from split_pres import (DEFAULT_SEED, check_manifest, default_manifest_path,  # noqa: E402
-                        list_stems, load_manifest, make_split)
+                        describe, list_stems, load_manifest, make_split)
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -67,7 +69,9 @@ def main():
         problems = check_manifest(manifest, stems)
         if problems:
             sys.exit(f'{manifest_path} does not match the data:\n  ' + '\n  '.join(problems))
-        print(f'using split manifest {manifest_path} (seed={manifest["seed"]})')
+        print(f'using split manifest {manifest_path} ({describe(manifest)})')
+    elif opt.manifest:
+        sys.exit(f'{manifest_path} not found')
     else:
         manifest = make_split(stems, opt.seed)
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -115,7 +119,7 @@ def main():
         f.write(f'# made by tools/prepare_yolo_pres.py from {manifest_path.name}\n'
                 f'path: {out}\ntrain: images/train\nval: images/val\ntest: images/test\n'
                 f'names:\n  0: drugname\n')
-    shutil.copy2(manifest_path, out / 'split_manifest.json')
+    shutil.copy2(manifest_path, out / ('split_manifest' + manifest_path.suffix))
     with open(out / 'stats.json', 'w') as f:
         json.dump(stats, f, indent=1)
     print(f'dataset ready: {out}/data.yaml')

@@ -57,6 +57,29 @@ Kiểm tra một manifest có khớp với dữ liệu không:
 python tools/split_pres.py --label-dir <public_train>/prescription/label --check splits/pres_split_seed42.json
 ```
 
+### Dùng bộ chia của `1_vaipe` (`SPLIT=vaipe1`)
+
+Bộ chia trong thư mục dữ liệu `1_vaipe` (train / valid / test = **820 / 176 / 176**) được lưu ở **`splits/pres_split_vaipe1.csv`** (bản sao y nguyên của `1_vaipe/split_manifest.csv`).
+Bộ này khác bộ seed 42 ở trên:
+- Ảnh **cùng bệnh nhân / các lần khám gần nhau** được gom thành nhóm, mỗi nhóm nằm trọn trong một tập (cách gom: xem `1_vaipe/README.md`).
+- Ảnh `VAIPE_P_TRAIN_1172` bị loại (`split = excluded`) vì trùng byte với ảnh test không nhãn `VAIPE_P_TEST_32`. Script tự bỏ ảnh này khỏi dữ liệu gốc trước khi kiểm tra.
+- Các dòng `test_unlabeled` (ảnh test gốc, không nhãn) bị bỏ qua.
+- `valid` trong CSV được hiểu là tập `val`.
+
+Vẫn dùng dataset gốc `tommyngx/vaipepill2022` trên Kaggle, **không cần upload `1_vaipe`**: script chỉ lấy danh sách tên file từ CSV.
+`tools/split_pres.py` **không tạo lại** được bộ chia này, vì nó chia theo cách khác. File CSV đã commit là nguồn duy nhất, nên đừng xoá hay sửa nó.
+
+```python
+!SPLIT=vaipe1 bash /tmp/repo/scripts/kaggle_train_yolov8.sh
+```
+Trong log phải có `SPLIT manifest = splits/pres_split_vaipe1.csv` và `train: 820 images ... val: 176 ... test: 176`.
+`SEED` lúc này chỉ còn là seed train (mặc định 42). File zip kết quả chứa `split_manifest.csv`.
+
+Kiểm tra CSV có khớp với dữ liệu không:
+```bash
+python tools/split_pres.py --label-dir <public_train>/prescription/label --check splits/pres_split_vaipe1.csv
+```
+
 ---
 
 ## Bước 1: Tạo notebook
@@ -153,6 +176,7 @@ Ví dụ chỉ train YOLOv8: `!TRAIN_OCR=0 bash /tmp/repo/scripts/kaggle_train_y
 | Biến | Mặc định | Ý nghĩa |
 |---|---|---|
 | `SEED` | `42` | Seed chia dữ liệu và seed train. Đọc file `splits/pres_split_seed<SEED>.json` |
+| `SPLIT` | (trống) | Dùng bộ chia đã commit `splits/pres_split_<SPLIT>.csv` hoặc `.json` thay cho bộ chia theo seed. `vaipe1` = bộ chia của `1_vaipe` |
 | `TRAIN_YOLO` | `1` | `0` để bỏ qua YOLOv8 |
 | `TRAIN_OCR` | `1` | `0` để bỏ qua VietOCR |
 | `YOLO_MODEL` | `yolov8s.pt` | Có thể đổi sang `yolov8n.pt`, `yolov8m.pt`, ... |
